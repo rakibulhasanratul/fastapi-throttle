@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
 ## 🧑‍💻 Author
 
-**Rakibul Hasan Ratul** <rakibulhasanratul@proton.me>  
+**Rakibul Hasan Ratul** <rakibulhasanratul@proton.me>
 Independent Developer, Dhaka, Bangladesh
 
 ## 📄 License

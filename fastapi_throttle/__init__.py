@@ -1,10 +1,11 @@
-import asyncio
-import inspect
-import time
+from asyncio import iscoroutinefunction
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable
+from inspect import Parameter, signature
+from time import monotonic_ns
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -24,7 +25,7 @@ class TokenBucketLimiter:
         )
 
     def consume(self, identifier: str, token: int = 1) -> bool:
-        now_ns = time.monotonic_ns()
+        now_ns = monotonic_ns()
         bucket = self.buckets[identifier]
 
         if bucket.last_refill_ns == 0:
@@ -65,11 +66,11 @@ class RateLimiter:
         self.token_bucket_limiter = TokenBucketLimiter(
             rate_of_token=request_per_seconds, token_capacity=burst
         )
-        self._last_cleanup_ns = time.monotonic_ns()
+        self._last_cleanup_ns = monotonic_ns()
         self._clean_up_interval_ns = clean_up_interval_seconds * 1e9
 
     def _cleanup_usage_memory(self) -> None:
-        now_ns = time.monotonic_ns()
+        now_ns = monotonic_ns()
         if now_ns - self._last_cleanup_ns > self._clean_up_interval_ns:
             cutoff = now_ns - self.interval_ns
             for key in list(self.usage.keys()):
@@ -80,7 +81,7 @@ class RateLimiter:
     def is_allowed(self, identifier: str) -> bool:
         self._cleanup_usage_memory()
 
-        now_ns = time.monotonic_ns()
+        now_ns = monotonic_ns()
         record = self.usage[identifier]
 
         if record.last_seen_ns == 0 or now_ns - record.last_seen_ns > self.interval_ns:
@@ -131,8 +132,8 @@ def limit(
             )
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        is_async = asyncio.iscoroutinefunction(func)
-        sig = inspect.signature(func)
+        is_async = iscoroutinefunction(func)
+        sig = signature(func)
         has_request_param = any(
             param.annotation == Request for param in sig.parameters.values()
         )
@@ -189,16 +190,16 @@ def limit(
             # FastAPI resolves the Request from the parameter annotation alone
             # (no Depends needed), so the wrapper's __signature__ must carry it.
             # It goes first so the endpoint's own parameters keep their order.
-            new_params = [
-                inspect.Parameter(
+            wrapper = async_request_wrapper if is_async else sync_request_wrapper
+            _params = [
+                Parameter(
                     "request",
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    Parameter.POSITIONAL_OR_KEYWORD,
                     annotation=Request,
                 ),
                 *sig.parameters.values(),
             ]
-            wrapper = async_request_wrapper if is_async else sync_request_wrapper
-            setattr(wrapper, "__signature__", sig.replace(parameters=new_params))
+            setattr(wrapper, "__signature__", sig.replace(parameters=_params))  # noqa: B010
             return wrapper
 
     return decorator
