@@ -49,25 +49,15 @@ class UsageRecord:
     call_count: int
 
 
-class RateLimiter:
-    def __init__(
-        self,
-        max_calls: int,
-        interval_seconds: int,
-        request_per_seconds: float = 1.0,
-        burst: int = 10,
-        clean_up_interval_seconds: int = 60,
-    ) -> None:
+class FixedWindowLimiter:
+    def __init__(self, max_calls: int, interval_seconds: int) -> None:
         self.max_calls = max_calls
         self.interval_ns = interval_seconds * 1e9
         self.usage: defaultdict[str, UsageRecord] = defaultdict(
             lambda: UsageRecord(last_seen_ns=0, call_count=0)
         )
-        self.token_bucket_limiter = TokenBucketLimiter(
-            rate_of_token=request_per_seconds, token_capacity=burst
-        )
         self._last_cleanup_ns = monotonic_ns()
-        self._clean_up_interval_ns = clean_up_interval_seconds * 1e9
+        self._clean_up_interval_ns = interval_seconds * 1e9
 
     def _cleanup_usage_memory(self) -> None:
         now_ns = monotonic_ns()
@@ -87,12 +77,34 @@ class RateLimiter:
         if record.last_seen_ns == 0 or now_ns - record.last_seen_ns > self.interval_ns:
             record.last_seen_ns = now_ns
             record.call_count = 1
-        else:
-            if record.call_count >= self.max_calls:
-                return False
-            record.call_count += 1
-            record.last_seen_ns = now_ns
+            return True
 
+        if record.call_count >= self.max_calls:
+            return False
+        record.call_count += 1
+        record.last_seen_ns = now_ns
+        return True
+
+
+class RateLimiter:
+    def __init__(
+        self,
+        max_calls: int,
+        interval_seconds: int,
+        request_per_seconds: float = 1.0,
+        burst: int = 10,
+        clean_up_interval_seconds: int = 60,
+    ) -> None:
+        self.fixed_window_limiter = FixedWindowLimiter(
+            max_calls=max_calls, interval_seconds=interval_seconds
+        )
+        self.token_bucket_limiter = TokenBucketLimiter(
+            rate_of_token=request_per_seconds, token_capacity=burst
+        )
+
+    def is_allowed(self, identifier: str) -> bool:
+        if not self.fixed_window_limiter.is_allowed(identifier):
+            return False
         return self.token_bucket_limiter.consume(identifier)
 
 
