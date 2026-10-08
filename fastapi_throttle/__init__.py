@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable
 
-from fastapi import Depends, HTTPException, Request
-from fastapi.params import Depends as DependsParam
+from fastapi import HTTPException, Request
 
 
 @dataclass(slots=True)
@@ -32,7 +31,9 @@ class TokenBucketLimiter:
             bucket.last_refill_ns = now_ns
         else:
             elapsed_seconds = (now_ns - bucket.last_refill_ns) / 1e9
-            bucket.tokens = min(self.capacity, bucket.tokens + elapsed_seconds * self.rate)
+            bucket.tokens = min(
+                self.capacity, bucket.tokens + elapsed_seconds * self.rate
+            )
             bucket.last_refill_ns = now_ns
 
         if bucket.tokens >= token:
@@ -57,7 +58,7 @@ class RateLimiter:
         clean_up_interval_seconds: int = 60,
     ) -> None:
         self.max_calls = max_calls
-        self.interval_ns = interval_seconds * 1_000_000_000
+        self.interval_ns = interval_seconds * 1e9
         self.usage: defaultdict[str, UsageRecord] = defaultdict(
             lambda: UsageRecord(last_seen_ns=0, call_count=0)
         )
@@ -65,7 +66,7 @@ class RateLimiter:
             rate_of_token=request_per_seconds, token_capacity=burst
         )
         self._last_cleanup_ns = time.monotonic_ns()
-        self._clean_up_interval_ns = clean_up_interval_seconds * 1_000_000_000
+        self._clean_up_interval_ns = clean_up_interval_seconds * 1e9
 
     def _cleanup_usage_memory(self) -> None:
         now_ns = time.monotonic_ns()
@@ -132,18 +133,24 @@ def limit(
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         is_async = asyncio.iscoroutinefunction(func)
         sig = inspect.signature(func)
-        has_request_param = any(param.annotation == Request for param in sig.parameters.values())
+        has_request_param = any(
+            param.annotation == Request for param in sig.parameters.values()
+        )
 
         if has_request_param:
 
-            def _get_requests_from_args(args: tuple[Any], kwargs: dict[str, Any]) -> Request:
+            def _get_requests_from_args(
+                args: tuple[Any], kwargs: dict[str, Any]
+            ) -> Request:
                 for index, (name, param) in enumerate(sig.parameters.items()):
                     if param.annotation == Request:
                         if name in kwargs:
                             return kwargs[name]
                         elif index < len(args):
                             return args[index]
-                raise HTTPException(status_code=500, detail="Request parameter not found")
+                raise HTTPException(
+                    status_code=500, detail="Request parameter not found"
+                )
 
             @wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -161,39 +168,37 @@ def limit(
 
         else:
 
-            async def request_dependency(request: Request) -> Request:
-                return request
-
             @wraps(func)
             async def async_request_wrapper(
-                request: Request = Depends(request_dependency), *args: Any, **kwargs: Any
+                request: Request,
+                *args: Any,
+                **kwargs: Any,
             ) -> Any:
                 _limit_access(request)
                 return await func(*args, **kwargs)
 
             @wraps(func)
             def sync_request_wrapper(
-                request: Request = Depends(request_dependency), *args: Any, **kwargs: Any
+                request: Request,
+                *args: Any,
+                **kwargs: Any,
             ) -> Any:
                 _limit_access(request)
                 return func(*args, **kwargs)
 
-            # FastAPI reads __signature__ for DI, so the injected `request` must appear
-            # there. KEYWORD_ONLY keeps it from colliding with the endpoint's own
-            # positional parameters.
-            old_sig = inspect.signature(func)
+            # FastAPI resolves the Request from the parameter annotation alone
+            # (no Depends needed), so the wrapper's __signature__ must carry it.
+            # It goes first so the endpoint's own parameters keep their order.
             new_params = [
                 inspect.Parameter(
                     "request",
-                    inspect.Parameter.KEYWORD_ONLY,
-                    default=DependsParam(request_dependency),
-                )
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=Request,
+                ),
+                *sig.parameters.values(),
             ]
-            for param in old_sig.parameters.values():
-                new_params.append(param)
-
             wrapper = async_request_wrapper if is_async else sync_request_wrapper
-            setattr(wrapper, "__signature__", old_sig.replace(parameters=new_params))
+            setattr(wrapper, "__signature__", sig.replace(parameters=new_params))
             return wrapper
 
     return decorator
